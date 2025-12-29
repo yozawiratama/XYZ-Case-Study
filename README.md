@@ -6,10 +6,10 @@
 | ------------- | ------------------------------------------------ |
 | Document Name | Loan Mobile App – Solution Architecture & Design |
 | Document Type | System Design / Solution Architecture            |
-| Version       | **1.0**                                          |
+| Version       | **1.1**                                          |
 | Status        | Initial Version                                  |
 | Author        | Solution Analyst / Software Architect            |
-| Last Updated  | *(to be updated)*                                |
+| Last Updated  | 29 Dec 2025                                      |
 
 ---
 
@@ -23,5 +23,4 @@
 > Perubahan selanjutnya (minor maupun major) akan dicatat pada tabel ini untuk menjaga jejak evolusi desain dan keputusan arsitektural.
 
 ### To Do:
-- perlu cek lagi mermaidjs preview pada github
 - perlu dilengkapi dengan mail system
