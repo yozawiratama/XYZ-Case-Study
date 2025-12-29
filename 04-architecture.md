@@ -74,7 +74,7 @@ flowchart LR
 
     subgraph Core["On-Prem Core System"]
         C1[User & KYC Service]
-        C2[Loan Management Service\n(CQRS-ready)]
+        C2["Loan Management Service<br />(CQRS-ready)"]
         C3[Loan Ledger / Accounting]
         C4[Audit Log Service]
     end

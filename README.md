@@ -22,3 +22,6 @@
 > Catatan:
 > Perubahan selanjutnya (minor maupun major) akan dicatat pada tabel ini untuk menjaga jejak evolusi desain dan keputusan arsitektural.
 
+### To Do:
+- perlu cek lagi mermaidjs preview pada github
+- perlu dilengkapi dengan mail system

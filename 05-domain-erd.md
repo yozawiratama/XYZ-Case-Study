@@ -69,7 +69,7 @@ Mencatat aktivitas penting dan perubahan status untuk keperluan pelacakan dan ke
 Diagram berikut menggambarkan relasi utama antar entitas pada sistem:
 
 ```mermaid
-entityRelationshipDiagram
+erDiagram
     USER {
         uuid id PK
         string full_name
