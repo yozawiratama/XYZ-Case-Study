@@ -199,37 +199,175 @@ GET /api/loans/{loanId}/repayments
 
 * Hanya tersedia jika status pinjaman `ACTIVE`.
 
-**SELF-CHECK:**
-
-* Konsisten dengan Bagian 7.3.6 (Repayment Schedule Screen).
-* Data berasal dari schedule yang di-generate saat pinjaman disetujui (Bagian 6).
-
 ---
 
 ### 8.7 Notification Trigger API (Internal)
 
-Notifikasi email dan SMS tidak dipicu langsung dari client.
+Bagian ini mendefinisikan kontrak API internal untuk memicu pengiriman notifikasi melalui **Notification Orchestrator** (lihat Bagian 4.6). Notifikasi diposisikan sebagai proses *reliability-first* yang tidak dipicu dari client, serta wajib mendukung idempotency dan retry.
+
+#### 8.7.1 Notification Flow (End-to-End)
+
+Alur pengiriman notifikasi untuk event kritis (contoh: *Loan Approved*) adalah sebagai berikut:
+
+1. **On-Prem Core** melakukan transisi status pinjaman `IN_REVIEW → APPROVED` (Bagian 6).
+2. Core menulis **audit log** untuk perubahan status.
+3. Core memanggil **Internal Notification Trigger API** ke Notification Orchestrator melalui jalur aman (VPN/Private Link).
+4. Notification Orchestrator:
+
+   * memvalidasi event (schema & signature jika ada),
+   * melakukan **idempotency check**,
+   * menyusun pesan berdasarkan template,
+   * mengirim ke provider (email/SMS/push) sesuai policy,
+   * menyimpan status attempt dan hasil.
+5. Jika pengiriman gagal sementara, orchestrator melakukan retry sesuai kebijakan (lihat 8.7.4).
+
+Catatan desain: Core hanya bertanggung jawab pada “*emit event*” dan audit internal; pengiriman dan reliability delivery menjadi tanggung jawab Notification Orchestrator.
+
+
+#### 8.7.2 Internal Endpoint dan Payload Contract
+
+**Endpoint internal (contoh):**
 
 ```
-POST /internal/notifications/loan-approved
+POST /internal/notifications/events
 ```
 
-**Deskripsi:**
+**Tujuan:**
 
-* Endpoint internal untuk memicu pengiriman notifikasi persetujuan pinjaman.
+* menerima event notifikasi dari core,
+* memprosesnya secara deterministik dan idempotent.
 
-**Catatan desain:**
+**Contoh payload (ringkas, non-PII heavy):**
 
-* Dipanggil sebagai side effect dari perubahan status `IN_REVIEW → APPROVED`.
-* Tidak diekspos ke client.
+```json
+{
+  "event_id": "evt_01JHXXXXXX",
+  "event_type": "LOAN_APPROVED",
+  "occurred_at": "2025-12-29T10:15:30+07:00",
+  "subject": {
+    "user_id": "uuid-user",
+    "loan_id": "uuid-loan"
+  },
+  "channels": ["EMAIL", "SMS", "PUSH"],
+  "template": {
+    "name": "loan_approved_v1",
+    "variables": {
+      "loan_reference": "LN-20251229-0001"
+    }
+  }
+}
+```
+
+**Prinsip payload:**
+
+* **Minim data sensitif**: tidak mengirim nominal, NIK, atau detail KYC lewat event.
+* Template variables hanya membawa data yang aman; detail diambil oleh aplikasi melalui API saat user membuka aplikasi.
+* `event_id` wajib unik untuk mendukung idempotency.
+
+
+#### 8.7.3 Idempotency & Deduplication
+
+Karena notifikasi rawan dipicu ulang akibat retry, network issue, atau reprocessing, maka strategi idempotency menjadi wajib.
+
+**Idempotency Key:**
+
+* Level event: `event_id`
+* Level event-channel: `event_id + channel`
+
+**Aturan:**
+
+1. Jika Notification Orchestrator menerima `event_id` yang sudah pernah diproses:
+
+   * tidak mengirim ulang (deduplicate),
+   * mengembalikan respons “already processed”.
+2. Jika event sama diproses sebagian (misalnya email sukses, SMS gagal):
+
+   * orchestrator hanya mengulang kanal yang gagal (berdasarkan `event_id+channel`).
+
+**Penyimpanan status minimal yang dibutuhkan:**
+
+* `event_id`
+* `channel`
+* `attempt_count`
+* `last_attempt_at`
+* `status` (PENDING/SENT/FAILED)
+* `provider_response_code` (disanitasi)
+
+
+#### 8.7.4 Retry Strategy & Failure Handling
+
+Notifikasi harus tahan terhadap kegagalan sementara (temporary failure) dari provider.
+
+**Klasifikasi kegagalan:**
+
+* **Temporary failure**: timeout, 5xx provider, rate limit → eligible untuk retry.
+* **Permanent failure**: nomor tidak valid, email bounce hard, template invalid → tidak di-retry, masuk dead-letter/failed state.
+
+**Kebijakan retry (target design, dapat disederhanakan di MVP):**
+
+* Exponential backoff (misal: 1m, 5m, 15m, 60m)
+* Maksimum attempt per channel (misal: 5x)
+* Setelah melewati batas attempt:
+
+  * status menjadi `FAILED_PERMANENT`,
+  * dicatat untuk tindakan manual / investigasi.
+
+**Queue vs non-queue:**
+
+* MVP: retry dapat dilakukan di orchestrator dengan mekanisme scheduler sederhana.
+* Scale stage: gunakan message queue (dibahas di Bagian 10) untuk menguatkan reliability dan throughput.
+
+
+#### 8.7.5 Respons Endpoint (Internal)
+
+Contoh respons sukses:
+
+```json
+{
+  "event_id": "evt_01JHXXXXXX",
+  "status": "ACCEPTED",
+  "deduplicated": false
+}
+```
+
+Jika event duplicate:
+
+```json
+{
+  "event_id": "evt_01JHXXXXXX",
+  "status": "ALREADY_PROCESSED",
+  "deduplicated": true
+}
+```
+
+Catatan: Endpoint internal ini tidak harus menunggu delivery selesai; cukup menerima dan memproses asynchronous di sisi orchestrator.
 
 ---
 
 ### 8.8 Audit & Observability
 
-Setiap endpoint kritis secara implisit:
+Selain audit log di core (perubahan status loan), notifikasi memerlukan observability khusus untuk memastikan sistem dapat dioperasikan dengan baik.
 
-* mencatat audit log (aksi, waktu, reference ID),
-* memungkinkan tracing antar service (jika dikembangkan lebih lanjut).
+#### 8.8.1 Notification Delivery Logging (Orchestrator)
 
-Audit log **tidak** diisi oleh client dan **tidak** dapat dimanipulasi dari luar backend.
+Setiap attempt pengiriman mencatat:
+
+* `event_id`
+* `channel`
+* `attempt_count`
+* `provider_name`
+* `result` (SENT / TEMP_FAILED / PERM_FAILED)
+* `timestamp`
+
+**Prinsip keamanan log:**
+
+* tidak menyimpan payload sensitif,
+* response provider disanitasi (hindari menyimpan full message body).
+
+#### 8.8.2 Metrics yang Disarankan
+
+* delivery success rate per channel
+* retry rate
+* permanent failure rate
+* provider latency (p50/p95)
+* queue backlog (jika nanti menggunakan queue)
